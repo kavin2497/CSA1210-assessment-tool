@@ -1,0 +1,14 @@
+; Program 23 - Find minimum number in an array (8085)
+LXI H, 2000H
+MOV C, M
+INX H
+MOV A, M
+DCR C
+LOOP: INX H
+CMP M
+JC SKIP
+MOV A, M
+SKIP: DCR C
+JNZ LOOP
+STA 2100H
+HLT

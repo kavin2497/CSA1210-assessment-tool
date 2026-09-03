@@ -1,0 +1,14 @@
+; Program 22 - Find largest number in an array (8085)
+LXI H, 2000H
+MOV C, M
+INX H
+MOV A, M
+DCR C
+LOOP: INX H
+CMP M
+JNC SKIP
+MOV A, M
+SKIP: DCR C
+JNZ LOOP
+STA 2100H
+HLT

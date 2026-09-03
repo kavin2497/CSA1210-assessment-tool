@@ -1,0 +1,10 @@
+; Program 19 - Check positive or negative (8085)
+LDA 2000H
+ANI 80H
+JZ POS
+MVI A, 01H
+STA 2001H
+HLT
+POS: MVI A, 00H
+STA 2001H
+HLT

@@ -1,0 +1,10 @@
+; Program 18 - Check odd or even (8085)
+LDA 2000H
+ANI 01H
+JZ EVEN
+MVI A, 01H
+STA 2001H
+HLT
+EVEN: MVI A, 00H
+STA 2001H
+HLT
