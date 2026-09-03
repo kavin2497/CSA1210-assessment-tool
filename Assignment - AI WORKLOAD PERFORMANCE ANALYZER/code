@@ -1,0 +1,1446 @@
+# ==============================================================
+# AI WORKLOAD PERFORMANCE ANALYZER - INTERACTIVE DASHBOARD
+# Course: DSA01 - Object Oriented Programming with C++
+# Implementation: Python + Streamlit
+# ==============================================================
+
+import json
+from dataclasses import dataclass
+from collections import OrderedDict
+from abc import ABC, abstractmethod
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+
+# ==============================================================
+# PAGE CONFIGURATION
+# ==============================================================
+
+st.set_page_config(
+    page_title="AI Workload Performance Analyzer",
+    page_icon="⚡",
+    layout="wide"
+)
+
+
+# ==============================================================
+# SAMPLE WORKLOAD
+# ==============================================================
+
+DEFAULT_WORKLOAD = {
+    "job_id": "JOB001",
+    "num_images": 1000,
+    "image_size_mb": 2.5,
+
+    "clock_time_ns": 1,
+
+    "instructions": [
+        {
+            "id": "I1",
+            "operation": "LOAD",
+            "src": [],
+            "dest": "R1",
+            "address": 4096,
+            "resource": "MEMORY"
+        },
+        {
+            "id": "I2",
+            "operation": "ADD",
+            "src": ["R1", "R2"],
+            "dest": "R3",
+            "address": None,
+            "resource": "ALU"
+        },
+        {
+            "id": "I3",
+            "operation": "LOAD",
+            "src": [],
+            "dest": "R4",
+            "address": 4128,
+            "resource": "MEMORY"
+        },
+        {
+            "id": "I4",
+            "operation": "MUL",
+            "src": ["R3", "R4"],
+            "dest": "R5",
+            "address": None,
+            "resource": "MULTIPLIER"
+        },
+        {
+            "id": "I5",
+            "operation": "BRANCH",
+            "src": ["R5"],
+            "dest": "",
+            "address": None,
+            "resource": "ALU"
+        },
+        {
+            "id": "I6",
+            "operation": "STORE",
+            "src": ["R5"],
+            "dest": "",
+            "address": 8192,
+            "resource": "MEMORY"
+        }
+    ],
+
+    "cache": {
+        "block_size": 64,
+        "memory_latency_ns": 100,
+
+        "levels": [
+            {
+                "name": "L1",
+                "size_kb": 32,
+                "latency_ns": 1
+            },
+            {
+                "name": "L2",
+                "size_kb": 256,
+                "latency_ns": 8
+            },
+            {
+                "name": "L3",
+                "size_kb": 8192,
+                "latency_ns": 20
+            }
+        ]
+    },
+
+    "io": {
+        "transfer_rate_mb_s": 500,
+        "requests": 1000
+    }
+}
+
+
+# ==============================================================
+# DATA CLASSES
+# ==============================================================
+
+@dataclass
+class Instruction:
+    iid: str
+    operation: str
+    src: list
+    dest: str
+    address: int = None
+    resource: str = "ALU"
+
+
+@dataclass
+class AIJob:
+    job_id: str
+    num_images: int
+    image_size_mb: float
+    clock_time_ns: float
+    instructions: list
+
+
+# ==============================================================
+# PIPELINE ANALYZER
+# ==============================================================
+
+class PipelineAnalyzer:
+
+    STAGES = ["IF", "ID", "EX", "MEM", "WB"]
+
+    def __init__(self, instructions, clock_time_ns=1):
+        self.instructions = instructions
+        self.clock_time_ns = clock_time_ns
+
+    def analyze_hazards(self):
+
+        hazards = []
+        stalls = 0
+        flushes = 0
+
+        for i, current in enumerate(self.instructions):
+
+            # -------------------------------
+            # DATA HAZARD - RAW
+            # -------------------------------
+
+            for previous in self.instructions[:i]:
+
+                if previous.dest and previous.dest in current.src:
+
+                    hazards.append({
+                        "Instruction": current.iid,
+                        "Type": "Data / RAW",
+                        "Reason": (
+                            f"Reads {previous.dest} "
+                            f"written by {previous.iid}"
+                        ),
+                        "Penalty": "1 stall"
+                    })
+
+                    stalls += 1
+
+            # -------------------------------
+            # CONTROL HAZARD
+            # -------------------------------
+
+            if current.operation.upper() == "BRANCH":
+
+                hazards.append({
+                    "Instruction": current.iid,
+                    "Type": "Control",
+                    "Reason": "Branch changes possible next PC",
+                    "Penalty": "2 flush cycles"
+                })
+
+                flushes += 2
+
+            # -------------------------------
+            # STRUCTURAL HAZARD
+            # -------------------------------
+
+            if i > 0:
+
+                previous = self.instructions[i - 1]
+
+                if (
+                    current.resource == previous.resource
+                    and current.resource in ["MEMORY", "MULTIPLIER"]
+                ):
+
+                    hazards.append({
+                        "Instruction": current.iid,
+                        "Type": "Structural",
+                        "Reason": (
+                            f"Consecutive use of "
+                            f"{current.resource} resource"
+                        ),
+                        "Penalty": "1 stall"
+                    })
+
+                    stalls += 1
+
+        return hazards, stalls, flushes
+
+    def pipeline_table(self):
+
+        rows = []
+
+        for index, instruction in enumerate(self.instructions):
+
+            start_cycle = index + 1
+
+            row = {
+                "Instruction": instruction.iid,
+                "Operation": instruction.operation
+            }
+
+            for stage_index, stage in enumerate(self.STAGES):
+
+                row[stage] = start_cycle + stage_index
+
+            rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def metrics(self):
+
+        n = len(self.instructions)
+
+        hazards, stalls, flushes = self.analyze_hazards()
+
+        ideal_cycles = n + 4
+
+        total_cycles = ideal_cycles + stalls + flushes
+
+        cpi = total_cycles / n if n else 0
+
+        execution_time = total_cycles * self.clock_time_ns
+
+        non_pipeline_cycles = n * 5
+
+        speedup = (
+            non_pipeline_cycles / total_cycles
+            if total_cycles else 0
+        )
+
+        return {
+            "instructions": n,
+            "ideal_cycles": ideal_cycles,
+            "stalls": stalls,
+            "flushes": flushes,
+            "total_cycles": total_cycles,
+            "cpi": cpi,
+            "execution_time_ns": execution_time,
+            "non_pipeline_cycles": non_pipeline_cycles,
+            "speedup": speedup,
+            "hazards": hazards
+        }
+
+
+# ==============================================================
+# CACHE LEVEL
+# ==============================================================
+
+class CacheLevel:
+
+    def __init__(self, name, size_kb, block_size, latency_ns):
+
+        self.name = name
+        self.size_kb = size_kb
+        self.block_size = block_size
+        self.latency_ns = latency_ns
+
+        self.capacity_blocks = max(
+            1,
+            (size_kb * 1024) // block_size
+        )
+
+        self.cache = OrderedDict()
+
+        self.hits = 0
+        self.misses = 0
+
+    def access(self, address):
+
+        block = address // self.block_size
+
+        if block in self.cache:
+
+            self.hits += 1
+
+            self.cache.move_to_end(block)
+
+            return True
+
+        self.misses += 1
+
+        return False
+
+    def install(self, address):
+
+        block = address // self.block_size
+
+        if block in self.cache:
+
+            self.cache.move_to_end(block)
+
+            return
+
+        if len(self.cache) >= self.capacity_blocks:
+
+            self.cache.popitem(last=False)
+
+        self.cache[block] = True
+
+    def statistics(self):
+
+        total = self.hits + self.misses
+
+        hit_ratio = (
+            self.hits / total
+            if total else 0
+        )
+
+        miss_ratio = (
+            self.misses / total
+            if total else 0
+        )
+
+        return {
+            "Level": self.name,
+            "Hits": self.hits,
+            "Misses": self.misses,
+            "Hit Ratio": hit_ratio,
+            "Miss Ratio": miss_ratio
+        }
+
+
+# ==============================================================
+# CACHE ANALYZER
+# ==============================================================
+
+class CacheAnalyzer:
+
+    def __init__(self, cache_config):
+
+        self.block_size = cache_config["block_size"]
+
+        self.memory_latency = cache_config[
+            "memory_latency_ns"
+        ]
+
+        self.levels = []
+
+        for level in cache_config["levels"]:
+
+            self.levels.append(
+                CacheLevel(
+                    level["name"],
+                    level["size_kb"],
+                    self.block_size,
+                    level["latency_ns"]
+                )
+            )
+
+        self.access_log = []
+
+    def access(self, address):
+
+        accumulated_latency = 0
+        result_level = "Main Memory"
+
+        for level in self.levels:
+
+            accumulated_latency += level.latency_ns
+
+            if level.access(address):
+
+                result_level = level.name
+
+                # Install in upper levels
+                for upper_level in self.levels:
+                    upper_level.install(address)
+
+                    if upper_level.name == level.name:
+                        break
+
+                break
+
+        else:
+
+            accumulated_latency += self.memory_latency
+
+            result_level = "Main Memory"
+
+            for level in self.levels:
+                level.install(address)
+
+        self.access_log.append({
+            "Address": address,
+            "Block": address // self.block_size,
+            "Result": result_level,
+            "Latency (ns)": accumulated_latency
+        })
+
+    def analyze(self, instructions):
+
+        for instruction in instructions:
+
+            if (
+                instruction.operation.upper()
+                in ["LOAD", "STORE"]
+                and instruction.address is not None
+            ):
+
+                self.access(instruction.address)
+
+        total_accesses = len(self.access_log)
+
+        total_latency = sum(
+            item["Latency (ns)"]
+            for item in self.access_log
+        )
+
+        amat = (
+            total_latency / total_accesses
+            if total_accesses else 0
+        )
+
+        statistics = [
+            level.statistics()
+            for level in self.levels
+        ]
+
+        return {
+            "statistics": statistics,
+            "access_log": self.access_log,
+            "amat": amat
+        }
+
+
+# ==============================================================
+# I/O ANALYZER
+# ==============================================================
+# Abstract base class demonstrates inheritance
+# and polymorphism required by the assignment.
+# ==============================================================
+
+class IOAnalyzer(ABC):
+
+    def __init__(self, transfer_rate, requests):
+
+        self.transfer_rate = transfer_rate
+        self.requests = requests
+
+    @abstractmethod
+    def analyze(self, total_mb):
+
+        pass
+
+
+# ==============================================================
+# INTERRUPT-DRIVEN I/O
+# ==============================================================
+
+class InterruptDrivenIO(IOAnalyzer):
+
+    def analyze(self, total_mb):
+
+        transfer_time = total_mb / self.transfer_rate
+
+        cpu_service_time = self.requests * 0.002
+
+        cpu_utilization = min(
+            100,
+            (cpu_service_time / transfer_time) * 100
+            if transfer_time else 0
+        )
+
+        return {
+            "Method": "Interrupt-Driven I/O",
+            "Data (MB)": total_mb,
+            "Transfer Time (s)": transfer_time,
+            "CPU Service Time (s)": cpu_service_time,
+            "CPU Utilization (%)": cpu_utilization,
+            "CPU Interventions": self.requests
+        }
+
+
+# ==============================================================
+# DMA
+# ==============================================================
+
+class DMAIO(IOAnalyzer):
+
+    def analyze(self, total_mb):
+
+        transfer_time = total_mb / self.transfer_rate
+
+        setup_time = 0.005
+
+        cpu_service_time = (
+            setup_time +
+            (self.requests * 0.0002)
+        )
+
+        total_time = transfer_time + setup_time
+
+        cpu_utilization = min(
+            100,
+            (cpu_service_time / total_time) * 100
+            if total_time else 0
+        )
+
+        return {
+            "Method": "DMA",
+            "Data (MB)": total_mb,
+            "Transfer Time (s)": transfer_time,
+            "CPU Service Time (s)": cpu_service_time,
+            "CPU Utilization (%)": cpu_utilization,
+            "CPU Interventions": 2
+        }
+
+
+# ==============================================================
+# PERFORMANCE ANALYZER
+# ==============================================================
+
+class PerformanceAnalyzer:
+
+    def analyze(self, pipeline_metrics, cache_result, io_results):
+
+        pipeline_score = pipeline_metrics["cpi"]
+
+        cache_score = cache_result["amat"] / 10
+
+        max_io_utilization = max(
+            item["CPU Utilization (%)"]
+            for item in io_results
+        )
+
+        io_score = max_io_utilization / 10
+
+        scores = {
+            "Pipeline": pipeline_score,
+            "Cache / Memory": cache_score,
+            "I/O": io_score
+        }
+
+        bottleneck = max(
+            scores,
+            key=scores.get
+        )
+
+        return scores, bottleneck
+
+
+# ==============================================================
+# LOAD WORKLOAD
+# ==============================================================
+
+def load_workload(data):
+
+    instructions = []
+
+    for item in data["instructions"]:
+
+        instructions.append(
+            Instruction(
+                iid=item["id"],
+                operation=item["operation"],
+                src=item.get("src", []),
+                dest=item.get("dest", ""),
+                address=item.get("address"),
+                resource=item.get("resource", "ALU")
+            )
+        )
+
+    return AIJob(
+        job_id=data["job_id"],
+        num_images=data["num_images"],
+        image_size_mb=data["image_size_mb"],
+        clock_time_ns=data.get("clock_time_ns", 1),
+        instructions=instructions
+    )
+
+
+# ==============================================================
+# JSON VALIDATION
+# ==============================================================
+
+def validate_workload(data):
+
+    required_fields = [
+        "job_id",
+        "num_images",
+        "image_size_mb",
+        "instructions",
+        "cache",
+        "io"
+    ]
+
+    for field in required_fields:
+
+        if field not in data:
+
+            raise ValueError(
+                f"Missing required field: {field}"
+            )
+
+    if not data["instructions"]:
+
+        raise ValueError(
+            "Instruction list cannot be empty."
+        )
+
+
+# ==============================================================
+# DASHBOARD HEADER
+# ==============================================================
+
+st.title("⚡ AI Workload Performance Analyzer")
+
+st.markdown(
+    """
+    ### Pipeline • Cache • I/O Performance Dashboard
+
+    Analyze AI image-processing workloads and identify the
+    major performance bottleneck using quantitative simulation.
+    """
+)
+
+st.divider()
+
+
+# ==============================================================
+# SIDEBAR
+# ==============================================================
+
+st.sidebar.header("⚙️ Workload Input")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Workload JSON",
+    type=["json"]
+)
+
+use_sample = st.sidebar.checkbox(
+    "Use Sample Workload",
+    value=True
+)
+
+
+# ==============================================================
+# LOAD INPUT
+# ==============================================================
+
+try:
+
+    if uploaded_file is not None:
+
+        data = json.load(uploaded_file)
+
+    elif use_sample:
+
+        data = DEFAULT_WORKLOAD
+
+    else:
+
+        st.warning(
+            "Upload a JSON workload or select Sample Workload."
+        )
+
+        st.stop()
+
+    validate_workload(data)
+
+    job = load_workload(data)
+
+except Exception as error:
+
+    st.error(
+        f"Input Error: {error}"
+    )
+
+    st.stop()
+
+
+# ==============================================================
+# WORKLOAD SUMMARY
+# ==============================================================
+
+st.header("📋 Workload Information")
+
+col1, col2, col3, col4 = st.columns(4)
+
+total_data = (
+    job.num_images *
+    job.image_size_mb
+)
+
+with col1:
+    st.metric(
+        "Job ID",
+        job.job_id
+    )
+
+with col2:
+    st.metric(
+        "Images",
+        f"{job.num_images:,}"
+    )
+
+with col3:
+    st.metric(
+        "Image Size",
+        f"{job.image_size_mb} MB"
+    )
+
+with col4:
+    st.metric(
+        "Total Workload",
+        f"{total_data:,.1f} MB"
+    )
+
+
+# ==============================================================
+# PIPELINE ANALYSIS
+# ==============================================================
+
+st.divider()
+
+st.header("⚙️ Five-Stage Pipeline Analysis")
+
+pipeline = PipelineAnalyzer(
+    job.instructions,
+    job.clock_time_ns
+)
+
+pipeline_metrics = pipeline.metrics()
+
+# Metric cards
+
+c1, c2, c3, c4, c5 = st.columns(5)
+
+with c1:
+    st.metric(
+        "Total Cycles",
+        pipeline_metrics["total_cycles"]
+    )
+
+with c2:
+    st.metric(
+        "CPI",
+        f"{pipeline_metrics['cpi']:.2f}"
+    )
+
+with c3:
+    st.metric(
+        "Stalls",
+        pipeline_metrics["stalls"]
+    )
+
+with c4:
+    st.metric(
+        "Flushes",
+        pipeline_metrics["flushes"]
+    )
+
+with c5:
+    st.metric(
+        "Speed-up",
+        f"{pipeline_metrics['speedup']:.2f}×"
+    )
+
+
+# ==============================================================
+# PIPELINE TABLE
+# ==============================================================
+
+st.subheader("Pipeline Timing Table")
+
+pipeline_df = pipeline.pipeline_table()
+
+st.dataframe(
+    pipeline_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ==============================================================
+# PIPELINE VISUALIZATION
+# ==============================================================
+
+st.subheader("Pipeline Execution Visualization")
+
+pipeline_long = pipeline_df.melt(
+    id_vars=["Instruction", "Operation"],
+    value_vars=["IF", "ID", "EX", "MEM", "WB"],
+    var_name="Stage",
+    value_name="Cycle"
+)
+
+fig_pipeline = px.scatter(
+    pipeline_long,
+    x="Cycle",
+    y="Instruction",
+    color="Stage",
+    text="Stage",
+    hover_data=["Operation"]
+)
+
+fig_pipeline.update_traces(
+    marker=dict(size=18)
+)
+
+fig_pipeline.update_layout(
+    height=450,
+    xaxis_title="Clock Cycle",
+    yaxis_title="Instruction"
+)
+
+st.plotly_chart(
+    fig_pipeline,
+    use_container_width=True
+)
+
+
+# ==============================================================
+# HAZARD ANALYSIS
+# ==============================================================
+
+st.subheader("🚧 Hazard Analysis")
+
+hazard_df = pd.DataFrame(
+    pipeline_metrics["hazards"]
+)
+
+if not hazard_df.empty:
+
+    st.dataframe(
+        hazard_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    hazard_count = (
+        hazard_df["Type"]
+        .value_counts()
+        .reset_index()
+    )
+
+    hazard_count.columns = [
+        "Hazard Type",
+        "Count"
+    ]
+
+    fig_hazard = px.bar(
+        hazard_count,
+        x="Hazard Type",
+        y="Count",
+        text="Count",
+        title="Hazard Distribution"
+    )
+
+    st.plotly_chart(
+        fig_hazard,
+        use_container_width=True
+    )
+
+else:
+
+    st.success(
+        "No pipeline hazards detected."
+    )
+
+
+# ==============================================================
+# CACHE ANALYSIS
+# ==============================================================
+
+st.divider()
+
+st.header("🧠 Cache Hierarchy Analysis")
+
+cache_analyzer = CacheAnalyzer(
+    data["cache"]
+)
+
+cache_result = cache_analyzer.analyze(
+    job.instructions
+)
+
+cache_df = pd.DataFrame(
+    cache_result["statistics"]
+)
+
+cache_col1, cache_col2, cache_col3, cache_col4 = st.columns(4)
+
+with cache_col1:
+    st.metric(
+        "L1 Hit Ratio",
+        f"{cache_df.iloc[0]['Hit Ratio'] * 100:.1f}%"
+    )
+
+with cache_col2:
+    st.metric(
+        "L2 Hit Ratio",
+        f"{cache_df.iloc[1]['Hit Ratio'] * 100:.1f}%"
+    )
+
+with cache_col3:
+    st.metric(
+        "L3 Hit Ratio",
+        f"{cache_df.iloc[2]['Hit Ratio'] * 100:.1f}%"
+    )
+
+with cache_col4:
+    st.metric(
+        "AMAT",
+        f"{cache_result['amat']:.2f} ns"
+    )
+
+
+# ==============================================================
+# CACHE TABLE
+# ==============================================================
+
+st.subheader("Cache Statistics")
+
+display_cache = cache_df.copy()
+
+display_cache["Hit Ratio"] = (
+    display_cache["Hit Ratio"] * 100
+).round(2).astype(str) + "%"
+
+display_cache["Miss Ratio"] = (
+    display_cache["Miss Ratio"] * 100
+).round(2).astype(str) + "%"
+
+st.dataframe(
+    display_cache,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ==============================================================
+# CACHE HIT/MISS GRAPH
+# ==============================================================
+
+cache_chart_df = cache_df[
+    ["Level", "Hits", "Misses"]
+].melt(
+    id_vars="Level",
+    var_name="Result",
+    value_name="Count"
+)
+
+fig_cache = px.bar(
+    cache_chart_df,
+    x="Level",
+    y="Count",
+    color="Result",
+    barmode="group",
+    text="Count",
+    title="Cache Hit vs Miss"
+)
+
+st.plotly_chart(
+    fig_cache,
+    use_container_width=True
+)
+
+
+# ==============================================================
+# MEMORY ACCESS LOG
+# ==============================================================
+
+st.subheader("Memory Access Analysis")
+
+access_df = pd.DataFrame(
+    cache_result["access_log"]
+)
+
+if not access_df.empty:
+
+    st.dataframe(
+        access_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ==============================================================
+# I/O ANALYSIS
+# ==============================================================
+
+st.divider()
+
+st.header("🔄 I/O Performance Analysis")
+
+io_config = data["io"]
+
+transfer_rate = io_config[
+    "transfer_rate_mb_s"
+]
+
+requests = io_config[
+    "requests"
+]
+
+interrupt_io = InterruptDrivenIO(
+    transfer_rate,
+    requests
+)
+
+dma_io = DMAIO(
+    transfer_rate,
+    requests
+)
+
+interrupt_result = interrupt_io.analyze(
+    total_data
+)
+
+dma_result = dma_io.analyze(
+    total_data
+)
+
+io_results = [
+    interrupt_result,
+    dma_result
+]
+
+io_df = pd.DataFrame(
+    io_results
+)
+
+
+# ==============================================================
+# I/O METRICS
+# ==============================================================
+
+io1, io2, io3, io4 = st.columns(4)
+
+with io1:
+
+    st.metric(
+        "Transfer Rate",
+        f"{transfer_rate} MB/s"
+    )
+
+with io2:
+
+    st.metric(
+        "Requests",
+        f"{requests:,}"
+    )
+
+with io3:
+
+    st.metric(
+        "Interrupt CPU Utilization",
+        f"{interrupt_result['CPU Utilization (%)']:.2f}%"
+    )
+
+with io4:
+
+    st.metric(
+        "DMA CPU Utilization",
+        f"{dma_result['CPU Utilization (%)']:.2f}%"
+    )
+
+
+# ==============================================================
+# I/O TABLE
+# ==============================================================
+
+st.subheader("Interrupt-Driven I/O vs DMA")
+
+display_io = io_df.copy()
+
+for column in [
+    "Transfer Time (s)",
+    "CPU Service Time (s)",
+    "CPU Utilization (%)"
+]:
+
+    display_io[column] = display_io[column].round(4)
+
+st.dataframe(
+    display_io,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ==============================================================
+# I/O GRAPH
+# ==============================================================
+
+fig_io = px.bar(
+    io_df,
+    x="Method",
+    y="CPU Utilization (%)",
+    text="CPU Utilization (%)",
+    title="CPU Utilization Comparison"
+)
+
+st.plotly_chart(
+    fig_io,
+    use_container_width=True
+)
+
+
+# ==============================================================
+# CPU INTERVENTION GRAPH
+# ==============================================================
+
+fig_intervention = px.bar(
+    io_df,
+    x="Method",
+    y="CPU Interventions",
+    text="CPU Interventions",
+    title="CPU Intervention Comparison"
+)
+
+st.plotly_chart(
+    fig_intervention,
+    use_container_width=True
+)
+
+
+# ==============================================================
+# BOTTLENECK ANALYSIS
+# ==============================================================
+
+st.divider()
+
+st.header("🚨 Integrated Bottleneck Analysis")
+
+performance = PerformanceAnalyzer()
+
+scores, bottleneck = performance.analyze(
+    pipeline_metrics,
+    cache_result,
+    io_results
+)
+
+
+# ==============================================================
+# BOTTLENECK METRICS
+# ==============================================================
+
+b1, b2, b3 = st.columns(3)
+
+with b1:
+
+    st.metric(
+        "Pipeline Score",
+        f"{scores['Pipeline']:.2f}"
+    )
+
+with b2:
+
+    st.metric(
+        "Cache / Memory Score",
+        f"{scores['Cache / Memory']:.2f}"
+    )
+
+with b3:
+
+    st.metric(
+        "I/O Score",
+        f"{scores['I/O']:.2f}"
+    )
+
+
+# ==============================================================
+# BOTTLENECK CHART
+# ==============================================================
+
+score_df = pd.DataFrame({
+    "Subsystem": list(scores.keys()),
+    "Penalty Score": list(scores.values())
+})
+
+fig_bottleneck = px.bar(
+    score_df,
+    x="Subsystem",
+    y="Penalty Score",
+    text="Penalty Score",
+    title="Performance Bottleneck Comparison"
+)
+
+st.plotly_chart(
+    fig_bottleneck,
+    use_container_width=True
+)
+
+
+# ==============================================================
+# BOTTLENECK RESULT
+# ==============================================================
+
+st.success(
+    f"🔍 Identified Major Bottleneck: **{bottleneck}**"
+)
+
+
+# ==============================================================
+# FINAL PERFORMANCE SUMMARY
+# ==============================================================
+
+st.divider()
+
+st.header("📊 Final Performance Summary")
+
+summary_data = {
+    "Metric": [
+        "Instructions",
+        "Ideal Cycles",
+        "Stall Cycles",
+        "Flush Cycles",
+        "Total Cycles",
+        "CPI",
+        "Execution Time",
+        "Non-Pipelined Cycles",
+        "Speed-up",
+        "AMAT",
+        "Major Bottleneck"
+    ],
+
+    "Value": [
+        pipeline_metrics["instructions"],
+        pipeline_metrics["ideal_cycles"],
+        pipeline_metrics["stalls"],
+        pipeline_metrics["flushes"],
+        pipeline_metrics["total_cycles"],
+        f"{pipeline_metrics['cpi']:.2f}",
+        f"{pipeline_metrics['execution_time_ns']:.2f} ns",
+        pipeline_metrics["non_pipeline_cycles"],
+        f"{pipeline_metrics['speedup']:.2f}×",
+        f"{cache_result['amat']:.2f} ns",
+        bottleneck
+    ]
+}
+
+summary_df = pd.DataFrame(summary_data)
+
+st.dataframe(
+    summary_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ==============================================================
+# PERFORMANCE REPORT
+# ==============================================================
+
+def generate_report():
+
+    report = []
+
+    report.append(
+        "AI WORKLOAD PERFORMANCE ANALYZER"
+    )
+
+    report.append(
+        "=" * 50
+    )
+
+    report.append(
+        f"Job ID: {job.job_id}"
+    )
+
+    report.append(
+        f"Images: {job.num_images}"
+    )
+
+    report.append(
+        f"Image Size: {job.image_size_mb} MB"
+    )
+
+    report.append(
+        f"Total Data: {total_data} MB"
+    )
+
+    report.append("")
+
+    report.append(
+        "PIPELINE PERFORMANCE"
+    )
+
+    report.append("-" * 30)
+
+    report.append(
+        f"Instructions: "
+        f"{pipeline_metrics['instructions']}"
+    )
+
+    report.append(
+        f"Ideal Cycles: "
+        f"{pipeline_metrics['ideal_cycles']}"
+    )
+
+    report.append(
+        f"Stalls: "
+        f"{pipeline_metrics['stalls']}"
+    )
+
+    report.append(
+        f"Flushes: "
+        f"{pipeline_metrics['flushes']}"
+    )
+
+    report.append(
+        f"Total Cycles: "
+        f"{pipeline_metrics['total_cycles']}"
+    )
+
+    report.append(
+        f"CPI: "
+        f"{pipeline_metrics['cpi']:.2f}"
+    )
+
+    report.append(
+        f"Execution Time: "
+        f"{pipeline_metrics['execution_time_ns']:.2f} ns"
+    )
+
+    report.append(
+        f"Speed-up: "
+        f"{pipeline_metrics['speedup']:.2f}x"
+    )
+
+    report.append("")
+
+    report.append(
+        "CACHE PERFORMANCE"
+    )
+
+    report.append("-" * 30)
+
+    for item in cache_result["statistics"]:
+
+        report.append(
+            f"{item['Level']}: "
+            f"Hits={item['Hits']}, "
+            f"Misses={item['Misses']}, "
+            f"Hit Ratio={item['Hit Ratio']:.2%}"
+        )
+
+    report.append(
+        f"AMAT: {cache_result['amat']:.2f} ns"
+    )
+
+    report.append("")
+
+    report.append(
+        "I/O PERFORMANCE"
+    )
+
+    report.append("-" * 30)
+
+    for item in io_results:
+
+        report.append(
+            f"{item['Method']}: "
+            f"Transfer Time={item['Transfer Time (s)']:.4f}s, "
+            f"CPU Utilization="
+            f"{item['CPU Utilization (%)']:.2f}%, "
+            f"CPU Interventions="
+            f"{item['CPU Interventions']}"
+        )
+
+    report.append("")
+
+    report.append(
+        "BOTTLENECK ANALYSIS"
+    )
+
+    report.append("-" * 30)
+
+    for name, score in scores.items():
+
+        report.append(
+            f"{name}: {score:.2f}"
+        )
+
+    report.append(
+        f"Major Bottleneck: {bottleneck}"
+    )
+
+    return "\n".join(report)
+
+
+# ==============================================================
+# DOWNLOAD REPORT
+# ==============================================================
+
+st.subheader("📄 Performance Report")
+
+report_text = generate_report()
+
+st.download_button(
+    label="⬇️ Download Performance Report",
+    data=report_text,
+    file_name="performance_report.txt",
+    mime="text/plain"
+)
+
+
+# ==============================================================
+# FOOTER
+# ==============================================================
+
+st.divider()
+
+st.caption(
+    "AI Workload Performance Analyzer | "
+    "Five-Stage Pipeline • L1/L2/L3 Cache • "
+    "Interrupt I/O • DMA • Bottleneck Analysis"
+)
